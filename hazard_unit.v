@@ -13,7 +13,8 @@ module hazard_unit (
     //2'b00	No Hazard	The ALU takes the data normally from the Register File (the value it got during the Decode stage).
     //2'b10	EX/MEM Hazard	The ALU "snatches" the data from the MEMORY Stage. This is the result of the instruction that was just ahead of it.
     //2'b01	MEM/WB Hazard	The ALU "snatches" the data from the Writeback Stage. This is the result of the instruction that was two steps ahead.
-
+    input wire m_ext_busy, // High when MUL/DIV is still calculating
+    input wire interrupt_request, // signal from your DFA core or external pin
     input wire [4:0] rs1_id,      // Source registers currently in DECODE
     input wire [4:0] rs2_id,
     input wire [4:0] rd_ex,       // Dest register currently in EXECUTE
@@ -25,8 +26,9 @@ module hazard_unit (
     output reg id_ex_write,       // Connect to ID/EX Register Enable
     output reg ex_mem_write,      // Connect to EX/MEM Register Enable
     output reg mem_wb_write,      //  Connect to MEM/WB Register Enable
-    output reg stall_id_ex        // Connect to ID/EX Flush/Clear (Injects NOP)
-
+    output reg stall_id_ex,       // Connect to ID/EX Flush/Clear (Injects NOP)
+    output reg flush_ex_mem,     // Clears the Execute/Memory boundary
+    output reg flush_mem_wb      //  Clears the Memory/Writeback boundary
 );
 
 wire load_use_hazard;
@@ -58,9 +60,27 @@ always @(*) begin
         ex_mem_write = 1'b1;
         mem_wb_write = 1'b1;
         stall_id_ex  = 1'b0;
-
-        // PRIORITY 1: AXI Bus Stall (Global Freeze)
-        if (axi_stall) begin
+        flush_ex_mem  = 1'b0;
+        flush_mem_wb  = 1'b0;
+        // PRIORITY 1: INTERRUPT FROM DFA 
+        if (interrupt_request) begin
+        // 1. Force the PC to jump to the ISR (handled in PC logic, but we enable writing)
+        stall_id_ex  = 1'b1; // Flush ID/EX
+        flush_ex_mem = 1'b1; // Flush EX/MEM
+        flush_mem_wb = 1'b1; // Flush MEM/WB
+        end
+       
+        // PRIORITY 2 : M-Extension Multi-cycle Stall
+        else if (m_ext_busy) begin
+            pc_write     = 1'b0; // Stop Fetch
+            if_id_write  = 1'b0; // Stop Decode
+            id_ex_write  = 1'b0; // Freeze Execute (Keep the MUL/DIV instruction in EX)
+            ex_mem_write = 1'b0; // Don't let anything move to MEM
+            mem_wb_write = 1'b0; 
+            stall_id_ex  = 1'b0; // NO BUBBLE - we are pausing, not erasing
+        end
+        // PRIORITY 3: AXI Bus Stall (Global Freeze)
+       else if (axi_stall) begin
             pc_write     = 1'b0;  // counter is not increased 
             if_id_write  = 1'b0;  // instruction is not fetched
             id_ex_write  = 1'b0;  // Traps instruction entering EX
@@ -68,7 +88,7 @@ always @(*) begin
             mem_wb_write = 1'b0;  // Traps instruction entering WB
             stall_id_ex  = 1'b0;  // Do NOT flush. We want to preserve the instructions!
         end
-        // PRIORITY 2: Load-Use Hazard (Internal 1-Cycle Gap)
+        // PRIORITY 4: Load-Use Hazard (Internal 1-Cycle Gap)
         else if (load_use_hazard) begin
             pc_write     = 1'b0;  // Freeze Fetch
             if_id_write  = 1'b0;  // Freeze Decode
