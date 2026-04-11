@@ -64,7 +64,7 @@ module pipe #(
   wire        jal;
   wire        jalr;
   wire        branch;
-  reg         stall_read;
+  wire        stall_read;
   wire [31:0] instruction;
   wire [31:0] reg_rdata2;
   wire [31:0] reg_rdata1;
@@ -99,6 +99,12 @@ module pipe #(
   wire [31:0] wb_write_data;
   wire [31:0] wb_read_data;
 
+  // Hazard Unit and M-Extension signals
+  wire mul_div_busy;
+  wire m_ext_sel;
+  wire hu_pc_write, hu_if_id_write, hu_id_ex_write;
+  wire hu_stall_id_ex, hu_flush_if_id;
+
   // -----------------------------------------------------//
   // SPLIT ARCHITECTURE: TCM & MMIO Routing
   // -----------------------------------------------------//
@@ -127,9 +133,34 @@ module pipe #(
   wire [31:0] axi_read_data;
   assign dmem_read_data = is_mmio_read ? axi_read_data : dmem_read_data_temp;
 
-  // Combine external stall with AXI backpressure
-  wire axi_bus_stall;
-  wire global_stall = stall | axi_bus_stall;
+  // Instantiate the Hazard Unit
+  hazard_unit hu (
+      .rs1_ex(src1_select),       // From ID/EX
+      .rs2_ex(src2_select),       // From ID/EX
+      .rd_mem(wb_dest_reg_sel),   // From MEM
+      .reg_mem_write(wb_mem_write),
+      .rd_wb(wb_dest_reg_sel),    // From WB
+      .reg_write_wb(wb_alu_to_reg),
+      .branch_taken(branch_taken),
+      .m_ext_busy(mul_div_busy),  // <--- CRITICAL: Connect to Execute
+      .interrupt_request(1'b0),   // Connect to DFA later
+      .rs1_id(instruction[19:15]),
+      .rs2_id(instruction[24:20]),
+      .rd_ex(dest_reg_sel),
+      .mem_read_ex(mem_to_reg),
+      .axi_stall(axi_bus_stall),  // <--- CRITICAL: Connect to AXI
+      
+      // Control Outputs
+      .pc_write(hu_pc_write),
+      .if_id_write(hu_if_id_write),
+      .id_ex_write(hu_id_ex_write),
+      .stall_id_ex(hu_stall_id_ex),
+      .flush_if_id(hu_flush_if_id)
+  );
+
+  // Update Global Stall to use Hazard Unit outputs
+  wire global_stall = !hu_if_id_write;
+  assign stall_read = global_stall;
   // -----------------------------------------------------//
 
   IF_ID IF_ID_stage (
@@ -159,6 +190,7 @@ module pipe #(
       .mem_write_w        (mem_write),
       .mem_to_reg_w       (mem_to_reg),
       .arithsubtype_w     (arithsubtype),
+      .m_extension_sel_w  (m_ext_sel),    // Connect M-Extension signal
       .pc_w               (pc),
       .src1_select_w      (src1_select),
       .src2_select_w      (src2_select),
@@ -190,11 +222,6 @@ module pipe #(
     end
   end
 
-  always @(posedge clk or negedge reset) begin
-    if (!reset) stall_read <= 1'b1;
-    else stall_read <= global_stall; // Uses merged stall
-  end
-
   execute execute (
       .clk  (clk),
       .reset(reset),
@@ -211,8 +238,9 @@ module pipe #(
       .alu          (alu),
       .branch       (branch),
       .arithsubtype (arithsubtype),
+      .m_extension_sel(m_ext_sel),   // Input from IF_ID
       .mem_to_reg   (mem_to_reg),
-      .stall_read   (stall_read),
+      .stall_read   (!hu_id_ex_write),  // Use Hazard Unit signal
       .dest_reg_sel (dest_reg_sel),
       .alu_op       (alu_operation),
       .dmem_raddr   (dmem_read_offset),
@@ -224,6 +252,7 @@ module pipe #(
       .branch_stall (branch_stall),
       .next_pc      (next_pc),
       .branch_taken (branch_taken),
+      .mul_div_busy (mul_div_busy),    // Output to Hazard Unit
       .wb_result        (wb_result),
       .wb_mem_write     (wb_mem_write),
       .wb_alu_to_reg    (wb_alu_to_reg),
