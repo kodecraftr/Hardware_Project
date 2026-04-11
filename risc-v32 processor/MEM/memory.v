@@ -16,7 +16,7 @@ module instr_mem (
   // FPGA ROM initialization
   // Initialize instruction memory from hex file (simulation / FPGA)
   initial begin
-    $readmemh("../mem_generator/imem_dmem/imem.hex", imem);
+    $readmemh("imem.hex", imem);
   end
 
   // Synchronous instruction fetch
@@ -57,7 +57,7 @@ module data_mem (
   // Simulation / FPGA init
   // TODO-DMEM-2: Initialize data memory from dmem.hex file
   initial begin
-    $readmemh("../mem_generator/imem_dmem/dmem.hex", dmem);
+    $readmemh("dmem.hex", dmem);
   end
 
   // -------------------------

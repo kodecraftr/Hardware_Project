@@ -13,7 +13,7 @@ CFLAGS  = -march=rv32i -mabi=ilp32
 
 
 #////Source for c code file ///////////////////////////
-SRC = main
+SRC = main.c
 
 TARGET   = code.elf
 

@@ -5,19 +5,23 @@ module IF_ID #(
 ) (
     input      clk,
     input      reset,
-    input      stall,
+    input      stall,      // IMMEDIATE AXI Stall 
     output reg exception,
 
     // IMEM interface
     input        inst_mem_is_valid,
     input [31:0] inst_mem_read_data,
 
-    // ----------------------------- // Signals previously read from pipe  // -----------------------------
+    // ----------------------------- 
+    // Signals previously read from pipe  
+    // -----------------------------
     input        stall_read_i,
     input [31:0] inst_fetch_pc,
     input [31:0] instruction_i,
 
-    // -----------------------------    // WB-stage signals (passed in)    // -----------------------------
+    // -----------------------------    
+    // WB-stage signals (passed in)    
+    // -----------------------------
     input        wb_stall,
     input        wb_alu_to_reg,
     input        wb_mem_to_reg,
@@ -25,7 +29,9 @@ module IF_ID #(
     input [31:0] wb_result,
     input [31:0] wb_read_data,
 
-    // -----------------------------    // Instruction memory address info    // -----------------------------
+    // -----------------------------    
+    // Instruction memory address info    
+    // -----------------------------
     input  [ 1:0] inst_mem_offset,
     output [31:0] execute_immediate_w,
     output        immediate_sel_w,
@@ -56,21 +62,11 @@ module IF_ID #(
 
   ////////////////////////////////////////////////////////////// IF stage////////////////////////////////////////////////////////////
 
-
-  // TODO-1:
-  // Implement IF-stage instruction selection.
-  // - On stall_read_i = 1, insert a NOP
-  // - Otherwise, pass instruction/data from instruction memory
-
-  //assign instruction_o = stall_read_i ? NOP : instruction_i;
-  assign instruction_o = stall_read_i ? NOP : inst_mem_read_data; // FIXED: Fetches the actual instruction from memory to prevent NOP loop
+  // FIXED: Removed NOP injection. During an AXI stall, we want to maintain 
+  // the current instruction, not flush it. The pipeline register handles the freeze.
+  assign instruction_o = inst_mem_read_data; 
 
   ////////////////////////////////////////////////////////////// Exception detection////////////////////////////////////////////////////////////
-
-  // TODO-2:
-  // Assert exception when:
-  // - illegal instruction is detected
-  // - instruction fetch is misaligned (inst_mem_offset != 2'b00)
 
   always @(posedge clk or negedge reset) begin
     if (!reset) exception <= 1'b0;
@@ -80,56 +76,22 @@ module IF_ID #(
 
   ////////////////////////////////////////////////////////////// ID stage: immediate generation ///////////////////////////////////////////////////////////
 
-  // Generate 32-bit immediates for:
-  // JAL, JALR, BRANCH, LOAD, STORE, ARITH-I, LUI
-  // For unsupported opcodes, set illegal_inst = 1
-  //
-  // Definitions:
-  // - instruction_i[31] is the sign bit
-  // - "Sign-extend" means: replicate instruction_i[31] to fill all unused MSBs
-  // - The number of replicated bits is implied by the immediate bit ranges below
-  // - All immediates must be exactly 32 bits wide
-
   always @(*) begin
     immediate    = 32'h0;
     illegal_inst = 1'b0;
 
     case (instruction_i[`OPCODE])
-      // JALR:
-      // Lower 12 bits  = instruction_i[31:20]
-      // Upper 20 bits  = Sign-extend
       JALR: immediate = {{20{instruction_i[31]}}, instruction_i[31:20]};
 
-      // BRANCH:
-      // immediate[12]   = instruction_i[31]   (sign bit)
-      // immediate[11]   = instruction_i[7]
-      // immediate[10:5] = instruction_i[30:25]
-      // immediate[4:1]  = instruction_i[11:8]
-      // immediate[0]	= 1'b0
-      // immediate[31:13]= Sign-extend
       BRANCH:
       immediate = {
         {20{instruction_i[31]}}, instruction_i[7], instruction_i[30:25], instruction_i[11:8], 1'b0
       };
 
-      // LOAD:
-      // Lower 12 bits  = instruction_i[31:20]
-      // Upper 20 bits  = Sign-extend
       LOAD: immediate = {{20{instruction_i[31]}}, instruction_i[31:20]};
 
-      // STORE:
-      // Lower 5 bits   = instruction_i[11:7]
-      // Next 7 bits	= instruction_i[31:25]
-      // Upper 20 bits  = Sign-extend
       STORE: immediate = {{20{instruction_i[31]}}, instruction_i[31:25], instruction_i[11:7]};
 
-      // ARITH-I:
-      // If FUNC3 is SLL or SR:
-      //   immediate[4:0]  = instruction_i[24:20]
-      //   immediate[31:5] = 0
-      // Else:
-      //   Lower 12 bits  = instruction_i[31:20]
-      //   Upper 20 bits  = Sign-extend
       ARITHI:
       immediate =
                  (instruction_i[`FUNC3] == SLL ||
@@ -137,22 +99,10 @@ module IF_ID #(
                  ? {27'b0, instruction_i[24:20]}
                  : {{20{instruction_i[31]}}, instruction_i[31:20]};
 
-      // ARITH-R:
-      // No immediate
       ARITHR: immediate = 32'h0;
 
-      // LUI:
-      // Upper 20 bits = instruction_i[31:12]
-      // Lower 12 bits = 0
       LUI: immediate = {instruction_i[31:12], 12'b0};
 
-      // JAL:
-      // immediate[20]	= instruction_i[31]   (sign bit)
-      // immediate[19:12] = instruction_i[19:12]
-      // immediate[11]	= instruction_i[20]
-      // immediate[10:1]  = instruction_i[30:21]
-      // immediate[0] 	= 1'b0
-      // immediate[31:21] = Sign-extend
       JAL:
       immediate = {
         {12{instruction_i[31]}}, instruction_i[19:12], instruction_i[20], instruction_i[30:21], 1'b0
@@ -164,14 +114,10 @@ module IF_ID #(
 
   ////////////////////////////////////////////////////////////// ID -> EX Register////////////////////////////////////////////////////////////
 
-  // TODO-4:
-  // Generate control signals based on opcode
-  // alu, lui, jal, jalr, branch, mem_write, mem_to_reg, arithsubtype
-
   id_ex_reg u_id_ex (
       .clk    (clk),
       .reset  (reset),
-      .stall_n(stall_read_i),
+      .stall  (stall), // FIXED: Uses immediate AXI stall, not delayed stall_read_i
 
       // From ID
       .immediate_i(immediate),
@@ -224,7 +170,7 @@ endmodule
 module id_ex_reg (
     input clk,
     input reset,
-    input stall_n,
+    input stall, // FIXED: Renamed for clarity, active high
 
     // Inputs from ID
     input [31:0] immediate_i,
@@ -281,7 +227,7 @@ module id_ex_reg (
       dest_reg_sel_o      <= 5'h0;
       alu_op_o            <= 3'h0;
       illegal_inst_o      <= 1'b0;
-    end else if (!stall_n) begin
+    end else if (!stall) begin  // FIXED: Only updates when NOT stalled
       execute_immediate_o <= immediate_i;
       immediate_sel_o     <= immediate_sel_i;
       alu_o               <= alu_i;
