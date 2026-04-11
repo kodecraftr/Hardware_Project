@@ -14,6 +14,8 @@ module IF_ID #(
 
     // ----------------------------- // Signals previously read from pipe  // -----------------------------
     input        stall_read_i,
+    input        bubble_id_ex_i,
+    input        flush_i,
     input [31:0] inst_fetch_pc,
     input [31:0] instruction_i,
 
@@ -43,6 +45,7 @@ module IF_ID #(
     output [ 4:0] dest_reg_sel_w,
     output [ 2:0] alu_operation_w,
     output        illegal_inst_w,
+    output        is_m_ext_w,        // <-- ADD THIS LINE
     output [31:0] instruction_o
 );
 
@@ -53,6 +56,18 @@ module IF_ID #(
 
   reg [31:0] immediate;
   reg        illegal_inst;
+  reg [31:0] saved_inst;
+  reg [31:0] saved_inst_pc;
+  reg        saved_inst_valid;
+  reg        drop_fetch_resp;
+  reg [31:0] if_id_inst_reg;
+  reg [31:0] if_id_pc_reg;
+  wire [31:0] next_if_id_inst;
+  wire [31:0] next_if_id_pc;
+  wire        next_if_id_valid;
+  wire [31:0] decode_inst;
+  wire        drop_incoming_resp;
+  wire        fetch_resp_valid;
 
   ////////////////////////////////////////////////////////////// IF stage////////////////////////////////////////////////////////////
 
@@ -62,8 +77,58 @@ module IF_ID #(
   // - On stall_read_i = 1, insert a NOP
   // - Otherwise, pass instruction/data from instruction memory
 
-  //assign instruction_o = stall_read_i ? NOP : instruction_i;
-  assign instruction_o = stall_read_i ? NOP : inst_mem_read_data; // FIXED: Fetches the actual instruction from memory to prevent NOP loop
+  // If an IMEM response arrives while the pipeline is stalled, buffer it and
+  // replay it once the stall clears so fetch data is never dropped.
+  always @(posedge clk) begin
+    if (!reset) begin
+      saved_inst       <= NOP;
+      saved_inst_pc    <= RESET;
+      saved_inst_valid <= 1'b0;
+      drop_fetch_resp  <= 1'b0;
+      if_id_inst_reg   <= NOP;
+      if_id_pc_reg     <= RESET;
+    end else begin
+      if (flush_i) begin
+        saved_inst_valid <= 1'b0;
+        drop_fetch_resp  <= 1'b1;
+        if_id_inst_reg   <= NOP;
+        if_id_pc_reg     <= RESET;
+      end else begin
+        if (drop_fetch_resp && inst_mem_is_valid) begin
+          drop_fetch_resp <= 1'b0;
+        end
+
+        if (stall_read_i && fetch_resp_valid) begin
+          saved_inst       <= inst_mem_read_data;
+          saved_inst_pc    <= inst_fetch_pc;
+          saved_inst_valid <= 1'b1;
+        end else if (!stall_read_i && next_if_id_valid && saved_inst_valid) begin
+          saved_inst_valid <= 1'b0;
+        end
+
+        if (!stall_read_i) begin
+          if_id_inst_reg <= next_if_id_inst;
+          if_id_pc_reg   <= next_if_id_pc;
+        end
+      end
+    end
+  end
+
+  assign drop_incoming_resp = flush_i | drop_fetch_resp;
+  assign fetch_resp_valid = inst_mem_is_valid & ~drop_incoming_resp;
+  assign next_if_id_valid = saved_inst_valid | fetch_resp_valid;
+  assign next_if_id_inst  = saved_inst_valid ? saved_inst :
+                            fetch_resp_valid ? inst_mem_read_data :
+                            NOP;
+  assign next_if_id_pc    = saved_inst_valid ? saved_inst_pc : inst_fetch_pc;
+  assign decode_inst = if_id_inst_reg;
+  assign instruction_o = decode_inst;
+
+  // ----------------------------------------------------
+  // ADD THIS LINE
+  // ----------------------------------------------------
+  // Decode if instruction is an M-Extension operation
+  wire is_m_ext = (decode_inst[`OPCODE] == ARITHR) && (decode_inst[31:25] == FUNCT7_M);
 
   ////////////////////////////////////////////////////////////// Exception detection////////////////////////////////////////////////////////////
 
@@ -72,7 +137,7 @@ module IF_ID #(
   // - illegal instruction is detected
   // - instruction fetch is misaligned (inst_mem_offset != 2'b00)
 
-  always @(posedge clk or negedge reset) begin
+  always @(posedge clk) begin
     if (!reset) exception <= 1'b0;
     else if (illegal_inst || inst_mem_offset != 2'b00) exception <= 1'b1;
     else exception <= 1'b0;
@@ -94,11 +159,11 @@ module IF_ID #(
     immediate    = 32'h0;
     illegal_inst = 1'b0;
 
-    case (instruction_i[`OPCODE])
+    case (decode_inst[`OPCODE])
       // JALR:
       // Lower 12 bits  = instruction_i[31:20]
       // Upper 20 bits  = Sign-extend
-      JALR: immediate = {{20{instruction_i[31]}}, instruction_i[31:20]};
+      JALR: immediate = {{20{decode_inst[31]}}, decode_inst[31:20]};
 
       // BRANCH:
       // immediate[12]   = instruction_i[31]   (sign bit)
@@ -109,19 +174,19 @@ module IF_ID #(
       // immediate[31:13]= Sign-extend
       BRANCH:
       immediate = {
-        {20{instruction_i[31]}}, instruction_i[7], instruction_i[30:25], instruction_i[11:8], 1'b0
+        {20{decode_inst[31]}}, decode_inst[7], decode_inst[30:25], decode_inst[11:8], 1'b0
       };
 
       // LOAD:
       // Lower 12 bits  = instruction_i[31:20]
       // Upper 20 bits  = Sign-extend
-      LOAD: immediate = {{20{instruction_i[31]}}, instruction_i[31:20]};
+      LOAD: immediate = {{20{decode_inst[31]}}, decode_inst[31:20]};
 
       // STORE:
       // Lower 5 bits   = instruction_i[11:7]
       // Next 7 bits	= instruction_i[31:25]
       // Upper 20 bits  = Sign-extend
-      STORE: immediate = {{20{instruction_i[31]}}, instruction_i[31:25], instruction_i[11:7]};
+      STORE: immediate = {{20{decode_inst[31]}}, decode_inst[31:25], decode_inst[11:7]};
 
       // ARITH-I:
       // If FUNC3 is SLL or SR:
@@ -132,10 +197,10 @@ module IF_ID #(
       //   Upper 20 bits  = Sign-extend
       ARITHI:
       immediate =
-                 (instruction_i[`FUNC3] == SLL ||
-                  instruction_i[`FUNC3] == SR)
-                 ? {27'b0, instruction_i[24:20]}
-                 : {{20{instruction_i[31]}}, instruction_i[31:20]};
+                 (decode_inst[`FUNC3] == SLL ||
+                  decode_inst[`FUNC3] == SR)
+                 ? {27'b0, decode_inst[24:20]}
+                 : {{20{decode_inst[31]}}, decode_inst[31:20]};
 
       // ARITH-R:
       // No immediate
@@ -144,7 +209,7 @@ module IF_ID #(
       // LUI:
       // Upper 20 bits = instruction_i[31:12]
       // Lower 12 bits = 0
-      LUI: immediate = {instruction_i[31:12], 12'b0};
+      LUI: immediate = {decode_inst[31:12], 12'b0};
 
       // JAL:
       // immediate[20]	= instruction_i[31]   (sign bit)
@@ -155,7 +220,7 @@ module IF_ID #(
       // immediate[31:21] = Sign-extend
       JAL:
       immediate = {
-        {12{instruction_i[31]}}, instruction_i[19:12], instruction_i[20], instruction_i[30:21], 1'b0
+        {12{decode_inst[31]}}, decode_inst[19:12], decode_inst[20], decode_inst[30:21], 1'b0
       };
 
       default: illegal_inst = 1'b1;
@@ -171,32 +236,34 @@ module IF_ID #(
   id_ex_reg u_id_ex (
       .clk    (clk),
       .reset  (reset),
-      .stall_n(stall_read_i),
+      .stall_n(~stall_read_i),
+      .bubble_i(bubble_id_ex_i),
 
       // From ID
       .immediate_i(immediate),
       .immediate_sel_i(
-        (instruction_i[`OPCODE] == JALR)  || (instruction_i[`OPCODE] == LOAD)  ||
-        (instruction_i[`OPCODE] == ARITHI)
+        (decode_inst[`OPCODE] == JALR)  || (decode_inst[`OPCODE] == LOAD)  ||
+        (decode_inst[`OPCODE] == ARITHI)
     ),
-      .alu_i((instruction_i[`OPCODE] == ARITHI) || (instruction_i[`OPCODE] == ARITHR)),
-      .lui_i(instruction_i[`OPCODE] == LUI),
-      .jal_i(instruction_i[`OPCODE] == JAL),
-      .jalr_i(instruction_i[`OPCODE] == JALR),
-      .branch_i(instruction_i[`OPCODE] == BRANCH),
-      .mem_write_i(instruction_i[`OPCODE] == STORE),
-      .mem_to_reg_i(instruction_i[`OPCODE] == LOAD),
+      .alu_i((decode_inst[`OPCODE] == ARITHI) || (decode_inst[`OPCODE] == ARITHR)),
+      .lui_i(decode_inst[`OPCODE] == LUI),
+      .jal_i(decode_inst[`OPCODE] == JAL),
+      .jalr_i(decode_inst[`OPCODE] == JALR),
+      .branch_i(decode_inst[`OPCODE] == BRANCH),
+      .mem_write_i(decode_inst[`OPCODE] == STORE),
+      .mem_to_reg_i(decode_inst[`OPCODE] == LOAD),
       .arithsubtype_i (
-        instruction_i[`SUBTYPE] &&
-        !(instruction_i[`OPCODE] == ARITHI &&
-          instruction_i[`FUNC3] == ADD)
+        decode_inst[`SUBTYPE] &&
+        !(decode_inst[`OPCODE] == ARITHI &&
+          decode_inst[`FUNC3] == ADD)
     ),
-      .pc_i(inst_fetch_pc),
-      .src1_sel_i(instruction_i[`RS1]),
-      .src2_sel_i(instruction_i[`RS2]),
-      .dest_reg_sel_i(instruction_i[`RD]),
-      .alu_op_i(instruction_i[`FUNC3]),
+      .pc_i(if_id_pc_reg),
+      .src1_sel_i(decode_inst[`RS1]),
+      .src2_sel_i(decode_inst[`RS2]),
+      .dest_reg_sel_i(decode_inst[`RD]),
+      .alu_op_i(decode_inst[`FUNC3]),
       .illegal_inst_i(illegal_inst),
+      .is_m_ext_i(is_m_ext),         // <-- ADD THIS LINE (Input)
 
       // To EX (WIRES)
       .execute_immediate_o(execute_immediate_w),
@@ -214,91 +281,7 @@ module IF_ID #(
       .src2_sel_o         (src2_select_w),
       .dest_reg_sel_o     (dest_reg_sel_w),
       .alu_op_o           (alu_operation_w),
-      .illegal_inst_o     (illegal_inst_w)
+      .illegal_inst_o     (illegal_inst_w),
+      .is_m_ext_o         (is_m_ext_w)      // <-- ADD THIS LINE (Output)
   );
-endmodule
-
-
-////////////////////////////////////////////////////////////// ID -> EX register module////////////////////////////////////////////////////////////
-
-module id_ex_reg (
-    input clk,
-    input reset,
-    input stall_n,
-
-    // Inputs from ID
-    input [31:0] immediate_i,
-    input        immediate_sel_i,
-    input        alu_i,
-    input        lui_i,
-    input        jal_i,
-    input        jalr_i,
-    input        branch_i,
-    input        mem_write_i,
-    input        mem_to_reg_i,
-    input        arithsubtype_i,
-    input [31:0] pc_i,
-    input [ 4:0] src1_sel_i,
-    input [ 4:0] src2_sel_i,
-    input [ 4:0] dest_reg_sel_i,
-    input [ 2:0] alu_op_i,
-    input        illegal_inst_i,
-
-    // Outputs to EX
-    output reg [31:0] execute_immediate_o,
-    output reg        immediate_sel_o,
-    output reg        alu_o,
-    output reg        lui_o,
-    output reg        jal_o,
-    output reg        jalr_o,
-    output reg        branch_o,
-    output reg        mem_write_o,
-    output reg        mem_to_reg_o,
-    output reg        arithsubtype_o,
-    output reg [31:0] pc_o,
-    output reg [ 4:0] src1_sel_o,
-    output reg [ 4:0] src2_sel_o,
-    output reg [ 4:0] dest_reg_sel_o,
-    output reg [ 2:0] alu_op_o,
-    output reg        illegal_inst_o
-);
-
-  always @(posedge clk or negedge reset) begin
-    if (!reset) begin
-      execute_immediate_o <= 32'h0;
-      immediate_sel_o     <= 1'b0;
-      alu_o               <= 1'b0;
-      lui_o               <= 1'b0;
-      jal_o               <= 1'b0;
-      jalr_o              <= 1'b0;
-      branch_o            <= 1'b0;
-      mem_write_o         <= 1'b0;
-      mem_to_reg_o        <= 1'b0;
-      arithsubtype_o      <= 1'b0;
-      pc_o                <= 32'h0;
-      src1_sel_o          <= 5'h0;
-      src2_sel_o          <= 5'h0;
-      dest_reg_sel_o      <= 5'h0;
-      alu_op_o            <= 3'h0;
-      illegal_inst_o      <= 1'b0;
-    end else if (!stall_n) begin
-      execute_immediate_o <= immediate_i;
-      immediate_sel_o     <= immediate_sel_i;
-      alu_o               <= alu_i;
-      lui_o               <= lui_i;
-      jal_o               <= jal_i;
-      jalr_o              <= jalr_i;
-      branch_o            <= branch_i;
-      mem_write_o         <= mem_write_i;
-      mem_to_reg_o        <= mem_to_reg_i;
-      arithsubtype_o      <= arithsubtype_i;
-      pc_o                <= pc_i;
-      src1_sel_o          <= src1_sel_i;
-      src2_sel_o          <= src2_sel_i;
-      dest_reg_sel_o      <= dest_reg_sel_i;
-      alu_op_o            <= alu_op_i;
-      illegal_inst_o      <= illegal_inst_i;
-    end
-  end
-
 endmodule
