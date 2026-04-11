@@ -29,6 +29,7 @@ module execute
 	input  [4:0]  dest_reg_sel,
 	input  [2:0]  alu_op,
 	input  [1:0]  dmem_raddr,
+	input     	m_extension_sel,
 
 	// -----------------------------	// FROM WB	// -----------------------------
 	input     	wb_branch_i,
@@ -52,7 +53,8 @@ module execute
 	output    	wb_branch_nxt,
 	output    	wb_mem_to_reg,
 	output [1:0]  wb_read_address,
-	output [2:0]  mem_alu_operation
+	output [2:0]  mem_alu_operation,
+	output    	mul_div_busy
 );
 
 //////////////// Including OPCODES ////////////////////////////
@@ -63,6 +65,10 @@ module execute
 reg  [31:0] ex_result;
 wire [32:0] ex_result_subs;
 wire [32:0] ex_result_subu;
+
+wire [31:0] mul_div_result;
+wire mul_div_busy_int;
+wire is_m_ext = alu && m_extension_sel;
 
 ////////////////////////////////////////////////////////////// Operand selection///////////////////////////////////////////////////////
 
@@ -95,6 +101,18 @@ assign ex_result_subu = {1'b0, alu_operand1} - {1'b0, alu_operand2};
 
 assign write_address = alu_operand1 + execute_imm;
 assign branch_stall  = wb_branch_nxt_i || wb_branch_i;
+assign mul_div_busy = mul_div_busy_int;
+
+mul_div m_ext_unit (
+    .clk(clk),
+    .reset_n(reset),
+    .start(is_m_ext && !stall_read),
+    .funct3(alu_op),
+    .a(alu_operand1),
+    .b(alu_operand2),
+    .result(mul_div_result),
+    .busy(mul_div_busy_int)
+);
 
 ////////////////////////////////////////////////////////////// Next PC logic////////////////////////////////////////////////////////////
 
@@ -185,34 +203,31 @@ end
 
 
 always @(*) begin
-	case (1'b1)
-    	mem_write: ex_result = alu_operand2;
-    	jal,
-    	jalr:  	ex_result = pc + 4;
-    	lui:   	ex_result = execute_imm;
+    ex_result = 32'h0; // Default value
+    case (1'b1)
+        mem_write: ex_result = alu_operand2;
+        jal, jalr: ex_result = pc + 4;
+        lui:       ex_result = execute_imm;
 
-    	alu: begin
-        	case (alu_op)
-            	ADD : ex_result =
-                  	arithsubtype
-                  	? alu_operand1 - alu_operand2
-                  	: alu_operand1 + alu_operand2;
-            	SLL : ex_result = alu_operand1 << alu_operand2[4:0]; // TODO-EX-4: Perform logical left shift
-            	SLT : ex_result = ex_result_subs[32];
-            	SLTU: ex_result = ex_result_subu[32];// TODO-EX-4: Perform unsigned comparison
-            	XOR : ex_result = alu_operand1 ^ alu_operand2;// TODO-EX-4: Perform bitwise XOR
-            	SR  : ex_result =
-                  	arithsubtype
-                  	? $signed(alu_operand1) >>> alu_operand2[4:0]
-                  	: alu_operand1 >>> alu_operand2[4:0]; // BUG: max 31 bits shift is allowed [4:0]
-            	OR  : ex_result = alu_operand1 | alu_operand2;// TODO-EX-4: Perform bitwise OR
-            	AND : ex_result = alu_operand1 & alu_operand2;// TODO-EX-4: Perform bitwise AND
-            	default: ex_result = 'hx;
-        	endcase
-    	end
-
-    	default: ex_result = 'hx;
-	endcase
+        alu: begin
+            if (is_m_ext) begin
+                ex_result = mul_div_result;
+            end else begin
+                case (alu_op)
+                    ADD : ex_result = arithsubtype ? alu_operand1 - alu_operand2 : alu_operand1 + alu_operand2;
+                    SLL : ex_result = alu_operand1 << alu_operand2[4:0];
+                    SLT : ex_result = ex_result_subs[32];
+                    SLTU: ex_result = ex_result_subu[32];
+                    XOR : ex_result = alu_operand1 ^ alu_operand2;
+                    SR  : ex_result = arithsubtype ? $signed(alu_operand1) >>> alu_operand2[4:0] : alu_operand1 >> alu_operand2[4:0];
+                    OR  : ex_result = alu_operand1 | alu_operand2;
+                    AND : ex_result = alu_operand1 & alu_operand2;
+                    default: ex_result = 32'h0;
+                endcase
+            end
+        end
+        default: ex_result = 32'h0;
+    endcase
 end
 
 
@@ -285,7 +300,7 @@ module ex_mem_wb_reg (
 // - When a stall is asserted, prevent unintended updates
 // - All outputs must hold their previous values unless explicitly updated
 
-always @(posedge clk or negedge reset_n) begin
+always @(posedge clk) begin
 	if (!reset_n) begin
     	ex_mem_result     	<= 32'h0;
     	ex_mem_mem_write  	<= 1'b0;
