@@ -5,34 +5,21 @@ module IF_ID #(
 ) (
     input      clk,
     input      reset,
-    input      stall,      // IMMEDIATE AXI Stall 
+    input      stall,            // Global Pipeline Stall
     output reg exception,
 
     // IMEM interface
-    input        inst_mem_is_valid,
     input [31:0] inst_mem_read_data,
 
-    // ----------------------------- 
-    // Signals previously read from pipe  
-    // -----------------------------
-    input        stall_read_i,
-    input [31:0] inst_fetch_pc,
-    input [31:0] instruction_i,
+    // Pipe/Fetch Signals
+    input [31:0] inst_fetch_pc,  // The PC associated with the current instruction
 
-    // -----------------------------    
-    // WB-stage signals (passed in)    
-    // -----------------------------
-    input        wb_stall,
-    input        wb_alu_to_reg,
-    input        wb_mem_to_reg,
+    // WB-stage signals (For Register File Writing)
+    input        wb_regwrite,    // High if the WB stage is writing to a register
     input [ 4:0] wb_dest_reg_sel,
-    input [31:0] wb_result,
-    input [31:0] wb_read_data,
+    input [31:0] wb_data_to_write,
 
-    // -----------------------------    
-    // Instruction memory address info    
-    // -----------------------------
-    input  [ 1:0] inst_mem_offset,
+    // Outputs to EX Stage
     output [31:0] execute_immediate_w,
     output        immediate_sel_w,
     output        alu_w,
@@ -43,127 +30,128 @@ module IF_ID #(
     output        mem_write_w,
     output        mem_to_reg_w,
     output        arithsubtype_w,
+    output        m_extension_sel_w, // NEW: Signal for MUL/DIV unit
     output [31:0] pc_w,
-    output [ 4:0] src1_select_w,
-    output [ 4:0] src2_select_w,
+    output [31:0] reg_rdata1_w,      // NEW: Actual data from registers
+    output [31:0] reg_rdata2_w,      // NEW: Actual data from registers
     output [ 4:0] dest_reg_sel_w,
     output [ 2:0] alu_operation_w,
-    output        illegal_inst_w,
-    output [31:0] instruction_o
+    output        illegal_inst_w
 );
 
-  //////////////// Including OPCODES ////////////////////////////
   `include "opcode.vh"
-  //////////////////////////////
-  //////////////////////////////// LOCAL INTERNAL SIGNALS////////////////////////////////////////////////////////////
 
+  // Internal Wires for Decoder
   reg [31:0] immediate;
   reg        illegal_inst;
+  wire [31:0] rf_rdata1, rf_rdata2;
 
-  ////////////////////////////////////////////////////////////// IF stage////////////////////////////////////////////////////////////
+  // --------------------------------------------------------------------------
+  // 1. REGISTER FILE INSTANTIATION
+  // --------------------------------------------------------------------------
+  // We place the RF here so data is ready for the ID/EX register
+  regfile rf (
+      .clk(clk),
+      .we(wb_regwrite),
+      .rs1(inst_mem_read_data[19:15]),
+      .rs2(inst_mem_read_data[24:20]),
+      .rd(wb_dest_reg_sel),
+      .wdata(wb_data_to_write),
+      .rdata1(rf_rdata1),
+      .rdata2(rf_rdata2)
+  );
 
-  // FIXED: Removed NOP injection. During an AXI stall, we want to maintain 
-  // the current instruction, not flush it. The pipeline register handles the freeze.
-  assign instruction_o = inst_mem_read_data; 
+  // --------------------------------------------------------------------------
+  // 2. DECODER & IMMEDIATE GENERATION
+  // -------------------------------------------------------------------------- 
 
-  ////////////////////////////////////////////////////////////// Exception detection////////////////////////////////////////////////////////////
-
-  always @(posedge clk or negedge reset) begin
-    if (!reset) exception <= 1'b0;
-    else if (illegal_inst || inst_mem_offset != 2'b00) exception <= 1'b1;
-    else exception <= 1'b0;
-  end
-
-  ////////////////////////////////////////////////////////////// ID stage: immediate generation ///////////////////////////////////////////////////////////
-
+  // --------------------------------------------------------------------------
+  // 2. DECODER & IMMEDIATE GENERATION
+  // --------------------------------------------------------------------------
   always @(*) begin
     immediate    = 32'h0;
     illegal_inst = 1'b0;
 
-    case (instruction_i[`OPCODE])
-      JALR: immediate = {{20{instruction_i[31]}}, instruction_i[31:20]};
-
-      BRANCH:
-      immediate = {
-        {20{instruction_i[31]}}, instruction_i[7], instruction_i[30:25], instruction_i[11:8], 1'b0
-      };
-
-      LOAD: immediate = {{20{instruction_i[31]}}, instruction_i[31:20]};
-
-      STORE: immediate = {{20{instruction_i[31]}}, instruction_i[31:25], instruction_i[11:7]};
-
-      ARITHI:
-      immediate =
-                 (instruction_i[`FUNC3] == SLL ||
-                  instruction_i[`FUNC3] == SR)
-                 ? {27'b0, instruction_i[24:20]}
-                 : {{20{instruction_i[31]}}, instruction_i[31:20]};
-
-      ARITHR: immediate = 32'h0;
-
-      LUI: immediate = {instruction_i[31:12], 12'b0};
-
-      JAL:
-      immediate = {
-        {12{instruction_i[31]}}, instruction_i[19:12], instruction_i[20], instruction_i[30:21], 1'b0
-      };
-
+    case (inst_mem_read_data[`OPCODE])
+      JALR:   immediate = {{20{inst_mem_read_data[31]}}, inst_mem_read_data[31:20]};
+      LOAD:   immediate = {{20{inst_mem_read_data[31]}}, inst_mem_read_data[31:20]};
+      STORE:  immediate = {{20{inst_mem_read_data[31]}}, inst_mem_read_data[31:25], inst_mem_read_data[11:7]};
+      LUI:    immediate = {inst_mem_read_data[31:12], 12'b0};
+      
+      BRANCH: immediate = {{20{inst_mem_read_data[31]}}, inst_mem_read_data[7], inst_mem_read_data[30:25], inst_mem_read_data[11:8], 1'b0};
+      
+      JAL:    immediate = {{12{inst_mem_read_data[31]}}, inst_mem_read_data[19:12], inst_mem_read_data[20], inst_mem_read_data[30:21], 1'b0};
+      
+      ARITHI: immediate = (inst_mem_read_data[`FUNC3] == SLL || inst_mem_read_data[`FUNC3] == SR)
+                          ? {27'b0, inst_mem_read_data[24:20]}
+                          : {{20{inst_mem_read_data[31]}}, inst_mem_read_data[31:20]};
+      
+      ARITHR: immediate = 32'h0; // R-types have no immediate
+      
       default: illegal_inst = 1'b1;
     endcase
   end
 
-  ////////////////////////////////////////////////////////////// ID -> EX Register////////////////////////////////////////////////////////////
+  // --------------------------------------------------------------------------
+  // 3. ID -> EX PIPELINE REGISTER
+  // --------------------------------------------------------------------------
 
+  // --------------------------------------------------------------------------
+  // 3. ID -> EX PIPELINE REGISTER
+  // --------------------------------------------------------------------------
   id_ex_reg u_id_ex (
-      .clk    (clk),
-      .reset  (reset),
-      .stall  (stall), // FIXED: Uses immediate AXI stall, not delayed stall_read_i
+      .clk(clk),
+      .reset(reset),
+      .stall(stall),
 
-      // From ID
-      .immediate_i(immediate),
-      .immediate_sel_i(
-        (instruction_i[`OPCODE] == JALR)  || (instruction_i[`OPCODE] == LOAD)  ||
-        (instruction_i[`OPCODE] == ARITHI)
-    ),
-      .alu_i((instruction_i[`OPCODE] == ARITHI) || (instruction_i[`OPCODE] == ARITHR)),
-      .lui_i(instruction_i[`OPCODE] == LUI),
-      .jal_i(instruction_i[`OPCODE] == JAL),
-      .jalr_i(instruction_i[`OPCODE] == JALR),
-      .branch_i(instruction_i[`OPCODE] == BRANCH),
-      .mem_write_i(instruction_i[`OPCODE] == STORE),
-      .mem_to_reg_i(instruction_i[`OPCODE] == LOAD),
-      .arithsubtype_i (
-        instruction_i[`SUBTYPE] &&
-        !(instruction_i[`OPCODE] == ARITHI &&
-          instruction_i[`FUNC3] == ADD)
-    ),
+      // Control Signals
+      .immediate_sel_i( (inst_mem_read_data[`OPCODE] == JALR) || (inst_mem_read_data[`OPCODE] == LOAD) || (inst_mem_read_data[`OPCODE] == ARITHI) || (inst_mem_read_data[`OPCODE] == STORE) ),
+      .alu_i( (inst_mem_read_data[`OPCODE] == ARITHI) || (inst_mem_read_data[`OPCODE] == ARITHR) ),
+      .lui_i(inst_mem_read_data[`OPCODE] == LUI),
+      .jal_i(inst_mem_read_data[`OPCODE] == JAL),
+      .jalr_i(inst_mem_read_data[`OPCODE] == JALR),
+      .branch_i(inst_mem_read_data[`OPCODE] == BRANCH),
+      .mem_write_i(inst_mem_read_data[`OPCODE] == STORE),
+      .mem_to_reg_i(inst_mem_read_data[`OPCODE] == LOAD),
+      
+      // M-EXTENSION DETECTION: 
+      // In RISC-V, M-extension uses the same opcode as ARITHR, but funct7 is 7'b0000001
+      .m_extension_sel_i( (inst_mem_read_data[`OPCODE] == ARITHR) && (inst_mem_read_data[31:25] == 7'b0000001) ),
+      
+      // ARITHR only: bit 30 is subtype (ADD vs SUB, SRL vs SRA)
+      // For ARITHI, bit 30 is part of the immediate value, NOT subtype
+      .arithsubtype_i( inst_mem_read_data[30] && (inst_mem_read_data[`OPCODE] == ARITHR) ),
+      
+      // Data Signals
       .pc_i(inst_fetch_pc),
-      .src1_sel_i(instruction_i[`RS1]),
-      .src2_sel_i(instruction_i[`RS2]),
-      .dest_reg_sel_i(instruction_i[`RD]),
-      .alu_op_i(instruction_i[`FUNC3]),
+      .immediate_i(immediate),
+      .reg_rdata1_i(rf_rdata1),
+      .reg_rdata2_i(rf_rdata2),
+      .dest_reg_sel_i(inst_mem_read_data[`RD]),
+      .alu_op_i(inst_mem_read_data[`FUNC3]),
       .illegal_inst_i(illegal_inst),
 
-      // To EX (WIRES)
+      // To EX stage outputs
+      .pc_o(pc_w),
       .execute_immediate_o(execute_immediate_w),
-      .immediate_sel_o    (immediate_sel_w),
-      .alu_o              (alu_w),
-      .lui_o              (lui_w),
-      .jal_o              (jal_w),
-      .jalr_o             (jalr_w),
-      .branch_o           (branch_w),
-      .mem_write_o        (mem_write_w),
-      .mem_to_reg_o       (mem_to_reg_w),
-      .arithsubtype_o     (arithsubtype_w),
-      .pc_o               (pc_w),
-      .src1_sel_o         (src1_select_w),
-      .src2_sel_o         (src2_select_w),
-      .dest_reg_sel_o     (dest_reg_sel_w),
-      .alu_op_o           (alu_operation_w),
-      .illegal_inst_o     (illegal_inst_w)
+      .reg_rdata1_o(reg_rdata1_w),
+      .reg_rdata2_o(reg_rdata2_w),
+      .dest_reg_sel_o(dest_reg_sel_w),
+      .alu_op_o(alu_operation_w),
+      .immediate_sel_o(immediate_sel_w),
+      .alu_o(alu_w),
+      .lui_o(lui_w),
+      .jal_o(jal_w),
+      .jalr_o(jalr_w),
+      .branch_o(branch_w),
+      .mem_write_o(mem_write_w),
+      .mem_to_reg_o(mem_to_reg_w),
+      .arithsubtype_o(arithsubtype_w),
+      .m_extension_sel_o(m_extension_sel_w),
+      .illegal_inst_o(illegal_inst_w)
   );
-endmodule
 
+endmodule
 
 ////////////////////////////////////////////////////////////// ID -> EX register module////////////////////////////////////////////////////////////
 
@@ -182,10 +170,11 @@ module id_ex_reg (
     input        branch_i,
     input        mem_write_i,
     input        mem_to_reg_i,
+    input        m_extension_sel_i,
     input        arithsubtype_i,
     input [31:0] pc_i,
-    input [ 4:0] src1_sel_i,
-    input [ 4:0] src2_sel_i,
+    input [31:0] reg_rdata1_i,
+    input [31:0] reg_rdata2_i,
     input [ 4:0] dest_reg_sel_i,
     input [ 2:0] alu_op_i,
     input        illegal_inst_i,
@@ -200,10 +189,11 @@ module id_ex_reg (
     output reg        branch_o,
     output reg        mem_write_o,
     output reg        mem_to_reg_o,
+    output reg        m_extension_sel_o,
     output reg        arithsubtype_o,
     output reg [31:0] pc_o,
-    output reg [ 4:0] src1_sel_o,
-    output reg [ 4:0] src2_sel_o,
+    output reg [31:0] reg_rdata1_o,
+    output reg [31:0] reg_rdata2_o,
     output reg [ 4:0] dest_reg_sel_o,
     output reg [ 2:0] alu_op_o,
     output reg        illegal_inst_o
@@ -220,10 +210,11 @@ module id_ex_reg (
       branch_o            <= 1'b0;
       mem_write_o         <= 1'b0;
       mem_to_reg_o        <= 1'b0;
+      m_extension_sel_o   <= 1'b0;
       arithsubtype_o      <= 1'b0;
       pc_o                <= 32'h0;
-      src1_sel_o          <= 5'h0;
-      src2_sel_o          <= 5'h0;
+      reg_rdata1_o        <= 32'h0;
+      reg_rdata2_o        <= 32'h0;
       dest_reg_sel_o      <= 5'h0;
       alu_op_o            <= 3'h0;
       illegal_inst_o      <= 1'b0;
@@ -237,10 +228,11 @@ module id_ex_reg (
       branch_o            <= branch_i;
       mem_write_o         <= mem_write_i;
       mem_to_reg_o        <= mem_to_reg_i;
+      m_extension_sel_o   <= m_extension_sel_i;
       arithsubtype_o      <= arithsubtype_i;
       pc_o                <= pc_i;
-      src1_sel_o          <= src1_sel_i;
-      src2_sel_o          <= src2_sel_i;
+      reg_rdata1_o        <= reg_rdata1_i;
+      reg_rdata2_o        <= reg_rdata2_i;
       dest_reg_sel_o      <= dest_reg_sel_i;
       alu_op_o            <= alu_op_i;
       illegal_inst_o      <= illegal_inst_i;
