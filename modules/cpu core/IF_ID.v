@@ -284,4 +284,115 @@ module IF_ID #(
       .illegal_inst_o     (illegal_inst_w),
       .is_m_ext_o         (is_m_ext_w)      // <-- ADD THIS LINE (Output)
   );
+<<<<<<< HEAD
+=======
+endmodule
+
+
+////////////////////////////////////////////////////////////// ID -> EX register module////////////////////////////////////////////////////////////
+
+module id_ex_reg (
+    input clk,
+    input reset,
+    input stall_n,
+    input bubble_i,
+
+    // Inputs from ID
+    input [31:0] immediate_i,
+    input        immediate_sel_i,
+    input        alu_i,
+    input        lui_i,
+    input        jal_i,
+    input        jalr_i,
+    input        branch_i,
+    input        mem_write_i,
+    input        mem_to_reg_i,
+    input        arithsubtype_i,
+    input [31:0] pc_i,
+    input [ 4:0] src1_sel_i,
+    input [ 4:0] src2_sel_i,
+    input [ 4:0] dest_reg_sel_i,
+    input [ 2:0] alu_op_i,
+    input        illegal_inst_i,
+    input        is_m_ext_i,         // <-- ADD THIS LINE
+
+    // Outputs to EX
+    output reg [31:0] execute_immediate_o,
+    output reg        immediate_sel_o,
+    output reg        alu_o,
+    output reg        lui_o,
+    output reg        jal_o,
+    output reg        jalr_o,
+    output reg        branch_o,
+    output reg        mem_write_o,
+    output reg        mem_to_reg_o,
+    output reg        arithsubtype_o,
+    output reg [31:0] pc_o,
+    output reg [ 4:0] src1_sel_o,
+    output reg [ 4:0] src2_sel_o,
+    output reg [ 4:0] dest_reg_sel_o,
+    output reg [ 2:0] alu_op_o,
+    output reg        illegal_inst_o,
+    output reg        is_m_ext_o         // <-- ADD THIS LINE
+);
+
+  always @(posedge clk) begin
+    if (!reset) begin
+      execute_immediate_o <= 32'h0;
+      immediate_sel_o     <= 1'b0;
+      alu_o               <= 1'b0;
+      lui_o               <= 1'b0;
+      jal_o               <= 1'b0;
+      jalr_o              <= 1'b0;
+      branch_o            <= 1'b0;
+      mem_write_o         <= 1'b0;
+      mem_to_reg_o        <= 1'b0;
+      arithsubtype_o      <= 1'b0;
+      pc_o                <= 32'h0;
+      src1_sel_o          <= 5'h0;
+      src2_sel_o          <= 5'h0;
+      dest_reg_sel_o      <= 5'h0;
+      alu_op_o            <= 3'h0;
+      illegal_inst_o      <= 1'b0;
+      is_m_ext_o          <= 1'b0;       // <-- ADD THIS LINE
+    end else if (bubble_i) begin
+      execute_immediate_o <= 32'h0;
+      immediate_sel_o     <= 1'b0;
+      alu_o               <= 1'b0;
+      lui_o               <= 1'b0;
+      jal_o               <= 1'b0;
+      jalr_o              <= 1'b0;
+      branch_o            <= 1'b0;
+      mem_write_o         <= 1'b0;
+      mem_to_reg_o        <= 1'b0;
+      arithsubtype_o      <= 1'b0;
+      pc_o                <= 32'h0;
+      src1_sel_o          <= 5'h0;
+      src2_sel_o          <= 5'h0;
+      dest_reg_sel_o      <= 5'h0;
+      alu_op_o            <= 3'h0;
+      illegal_inst_o      <= 1'b0;
+      is_m_ext_o          <= 1'b0;
+    end else if (stall_n) begin
+      execute_immediate_o <= immediate_i;
+      immediate_sel_o     <= immediate_sel_i;
+      alu_o               <= alu_i;
+      lui_o               <= lui_i;
+      jal_o               <= jal_i;
+      jalr_o              <= jalr_i;
+      branch_o            <= branch_i;
+      mem_write_o         <= mem_write_i;
+      mem_to_reg_o        <= mem_to_reg_i;
+      arithsubtype_o      <= arithsubtype_i;
+      pc_o                <= pc_i;
+      src1_sel_o          <= src1_sel_i;
+      src2_sel_o          <= src2_sel_i;
+      dest_reg_sel_o      <= dest_reg_sel_i;
+      alu_op_o            <= alu_op_i;
+      illegal_inst_o      <= illegal_inst_i;
+      is_m_ext_o          <= is_m_ext_i; // <-- ADD THIS LINE
+    end
+  end
+
+>>>>>>> 0f96ef2627fd95f1860580ab95e43c1068d1d676
 endmodule
