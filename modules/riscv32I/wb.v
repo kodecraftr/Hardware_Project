@@ -1,27 +1,24 @@
-////////////////////////////////////////////////////////////
-// stage 3: Write Back
-////////////////////////////////////////////////////////////
+`timescale 1ns / 1ps
+
 module wb #(
     parameter [31:0] RESET = 32'h0000_0000
 ) (
     input clk,
     input reset,
 
+    input        fetch_pause_i,
     input        stall_read_i,
     input [31:0] fetch_pc_i,
-
-    input wb_branch_i,
     input wb_mem_to_reg_i,
-    input mem_write_i,
-
-    input [31:0] write_address_i,
-    input [31:0] alu_operand2_i,
-    input [ 2:0] alu_operation_i,
+    input wb_mem_write_i,
+    input [31:0] wb_store_address_i,
+    input [31:0] wb_store_data_i,
 
     input [2:0] wb_alu_operation_i,
     input [1:0] wb_read_address_i,
 
     input [31:0] dmem_read_data_i,
+    input        dmem_read_valid_i,
     input        dmem_write_valid_i,
 
     // Outputs
@@ -45,14 +42,14 @@ module wb #(
   // assigning these variables to read from the instruction memory
   ////////////////////////////////////////////////////////////
 
-  assign inst_mem_address_o = fetch_pc_i;
-  assign inst_mem_is_ready_o = !stall_read_i;
+  assign inst_mem_address_o  = fetch_pc_i;
+  assign inst_mem_is_ready_o = !fetch_pause_i && !stall_read_i;
 
   ////////////////////////////////////////////////////////////
-  // wb_stall flag for defining the first and second stall in branch instruction
+  // No WB-generated branch stalls. Control hazards are handled by EX-stage flush.
   ////////////////////////////////////////////////////////////
 
-  assign wb_stall_o = wb_stall_first_o || wb_stall_second_o;
+  assign wb_stall_o = 1'b0;
 
   ////////////////////////////////////////////////////////////
   // instruction fetch pc update
@@ -67,21 +64,13 @@ module wb #(
   end
 
   ////////////////////////////////////////////////////////////
-  // Branch stall variable declarations
-  ////////////////////////////////////////////////////////////
-
-  // Generate two-cycle stall for branch instructions
-  // - First cycle: stall when branch is detected
-  // - Second cycle: extend stall by one more cycle
-  // - Stall must not advance when a pending load has not completed
-
   always @(posedge clk or negedge reset) begin
     if (!reset) begin
       wb_stall_first_o  <= 1'b0;
       wb_stall_second_o <= 1'b0;
-    end else if (!stall_read_i && !((wb_mem_to_reg_i && !dmem_write_valid_i))) begin
-      wb_stall_first_o  <= wb_branch_i;
-      wb_stall_second_o <= wb_stall_first_o;
+    end else begin
+      wb_stall_first_o  <= 1'b0;
+      wb_stall_second_o <= 1'b0;
     end
   end
 
@@ -94,40 +83,37 @@ module wb #(
   // - Generate write data with proper byte replication
   // - Generate byte-enable signals based on address alignment
 
-  always @(posedge clk or negedge reset) begin
-    if (!reset) begin
-      wb_write_address_o <= 32'h0;
-      wb_write_byte_o    <= 4'h0;
-      wb_write_data_o    <= 32'h0;
-    end else if (!stall_read_i && mem_write_i) begin
-      wb_write_address_o <= write_address_i;
-      case (alu_operation_i)
+  always @* begin
+    wb_write_address_o = wb_store_address_i;
+    wb_write_byte_o    = 4'h0;
+    wb_write_data_o    = 32'h0;
 
-        // TODO-WB: Store Byte (SB)
-        SB: begin
-          wb_write_data_o <= {4{alu_operand2_i[7:0]}};
-          case (write_address_i[1:0])
-            2'b00:   wb_write_byte_o <= 4'b0001;
-            2'b01:   wb_write_byte_o <= 4'b0010;  // TODO
-            2'b10:   wb_write_byte_o <= 4'b0100;  // TODO
-            default: wb_write_byte_o <= 4'b1000;  // TODO
-          endcase
-        end
-        // TODO-WB: Store Halfword (SH)
-        SH: begin
-          wb_write_data_o <= {2{alu_operand2_i[15:0]}};
-          wb_write_byte_o <= write_address_i[1] ? 4'b1100 : 4'b0011;  // TODO
-        end
-        SW: begin
-          wb_write_data_o <= alu_operand2_i;
-          wb_write_byte_o <= 4'b1111;  // TODO
-        end
-        default: begin
-          wb_write_data_o <= 32'hx;
-          wb_write_byte_o <= 4'hx;
-        end
-      endcase
-    end
+    case (wb_alu_operation_i)
+
+      // TODO-WB: Store Byte (SB)
+      SB: begin
+        wb_write_data_o = {4{wb_store_data_i[7:0]}};
+        case (wb_store_address_i[1:0])
+          2'b00:   wb_write_byte_o = 4'b0001;
+          2'b01:   wb_write_byte_o = 4'b0010;
+          2'b10:   wb_write_byte_o = 4'b0100;
+          default: wb_write_byte_o = 4'b1000;
+        endcase
+      end
+      // TODO-WB: Store Halfword (SH)
+      SH: begin
+        wb_write_data_o = {2{wb_store_data_i[15:0]}};
+        wb_write_byte_o = wb_store_address_i[1] ? 4'b1100 : 4'b0011;
+      end
+      SW: begin
+        wb_write_data_o = wb_store_data_i;
+        wb_write_byte_o = 4'b1111;
+      end
+      default: begin
+        wb_write_data_o = 32'h0;
+        wb_write_byte_o = 4'h0;
+      end
+    endcase
   end
 
   ////////////////////////////////////////////////////////////
