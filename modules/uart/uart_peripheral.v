@@ -95,4 +95,57 @@ module uart_peripheral #(
             if (rx_status_clear_pending || rx_pop) rx_overflow <= 1'b0;
         end
     end
+    localparam integer TX_FIFO_DEPTH = 16;
+    localparam integer TX_FIFO_AW    = 4;
+
+    (* ram_style = "distributed" *) reg [7:0] tx_fifo [0:TX_FIFO_DEPTH-1];
+    reg [7:0] tx_data_buf;
+    reg [TX_FIFO_AW-1:0] tx_rd_ptr, tx_wr_ptr;
+    reg [4:0] tx_fifo_count;
+    reg tx_start_pending, tx_serializer_active, tx_busy_d;
+
+    wire tx_fifo_empty = (tx_fifo_count == 5'd0);
+    wire tx_fifo_full  = (tx_fifo_count == TX_FIFO_DEPTH);
+    wire tx_write_ready = !tx_fifo_full;
+    wire tx_push       = (we && (waddr[4:0] == 5'h00)) && tx_write_ready;
+    wire tx_launch     = !tx_serializer_active && !tx_fifo_empty;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n || control_rst_tx) begin
+            {tx_rd_ptr, tx_wr_ptr, tx_fifo_count, tx_start, tx_serializer_active} <= 0;
+        end else begin
+            tx_start <= 1'b0;
+            tx_busy_d <= tx_busy;
+
+            if (tx_start_pending) begin
+                tx_start <= 1'b1;
+                tx_start_pending <= 1'b0;
+            end
+            if (tx_launch) begin
+                tx_data_reg <= tx_data_buf;
+                tx_start_pending <= 1'b1;
+                tx_serializer_active <= 1'b1;
+            end
+            if (tx_serializer_active && tx_busy_d && !tx_busy) tx_serializer_active <= 1'b0;
+
+            case ({tx_launch, tx_push})
+                2'b01: begin // Push only
+                    if (tx_fifo_count == 5'd0) tx_data_buf <= wdata[7:0];
+                    else begin tx_fifo[tx_wr_ptr] <= wdata[7:0]; tx_wr_ptr <= tx_wr_ptr + 1'b1; end
+                    tx_fifo_count <= tx_fifo_count + 1'b1;
+                end
+                2'b10: begin // Launch only
+                    if (tx_fifo_count > 5'd1) begin tx_data_buf <= tx_fifo[tx_rd_ptr]; tx_rd_ptr <= tx_rd_ptr + 1'b1; end
+                    tx_fifo_count <= tx_fifo_count - 1'b1;
+                end
+                2'b11: begin // Both
+                    if (tx_fifo_count == 5'd1) tx_data_buf <= wdata[7:0];
+                    else begin
+                        tx_data_buf <= tx_fifo[tx_rd_ptr]; tx_rd_ptr <= tx_rd_ptr + 1'b1;
+                        tx_fifo[tx_wr_ptr] <= wdata[7:0]; tx_wr_ptr <= tx_wr_ptr + 1'b1;
+                    end
+                end
+            endcase
+        end
+    end
 endmodule
