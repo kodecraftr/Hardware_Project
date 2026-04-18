@@ -37,8 +37,16 @@ module execute
 	output reg [31:0] next_pc,
 	output reg    branch_taken,
 
-	// Temporary output for Stage 1
-	output reg [31:0] ex_result
+	// -----------------------------  // EX → WB	// -----------------------------
+	output [31:0] wb_result,
+	output    	wb_mem_write,
+	output    	wb_alu_to_reg,
+	output [4:0]  wb_dest_reg_sel,
+	output    	wb_mem_to_reg,
+	output [31:0] wb_store_address,
+	output [31:0] wb_store_data,
+	output [1:0]  wb_read_address,
+	output [2:0]  mem_alu_operation
 );
 
 //////////////// Including OPCODES ////////////////////////////
@@ -46,6 +54,7 @@ module execute
 
 ////////////////////////////////////////////////////////////// LOCAL INTERNAL SIGNALS/////////////////////////////////
 
+reg  [31:0] ex_result;
 wire [32:0] ex_result_subs;
 wire [32:0] ex_result_subu;
 
@@ -159,6 +168,94 @@ always @(*) begin
 
     	default: ex_result = 'hx;
 	endcase
+end
+
+////////////////////////////////////////////////////////////// EX → WB pipeline register/////////////////////////////////////////
+
+ex_mem_wb_reg u_ex_mem_wb (
+	.clk            (clk),
+	.reset_n        (reset),
+	.stall_n        (~stall_read),
+
+	.ex_result      (ex_result),
+	.store_address  (write_address),
+	.store_data     (alu_operand2),
+
+	.mem_write      (mem_write),
+	.alu_to_reg     (alu | lui | jal | jalr | mem_to_reg),
+	.dest_reg_sel   (dest_reg_sel),
+	.mem_to_reg     (mem_to_reg),
+	.read_address   (dmem_raddr),
+	.alu_operation  (alu_op),
+
+	.ex_mem_result        (wb_result),
+	.ex_mem_mem_write     (wb_mem_write),
+	.ex_mem_alu_to_reg    (wb_alu_to_reg),
+	.ex_mem_dest_reg_sel  (wb_dest_reg_sel),
+	.ex_mem_mem_to_reg    (wb_mem_to_reg),
+	.ex_mem_store_address (wb_store_address),
+	.ex_mem_store_data    (wb_store_data),
+	.ex_mem_read_address  (wb_read_address),
+	.ex_mem_alu_operation (mem_alu_operation)
+);
+
+endmodule
+
+
+////////////////////////////////////////////////////////////// Pipeline Register Module/////////////////////////////////////////
+module ex_mem_wb_reg (
+	input         clk,
+	input         reset_n,
+	input         stall_n,
+
+	// Data
+	input  [31:0] ex_result,
+	input  [31:0] store_address,
+	input  [31:0] store_data,
+
+	// Control inputs
+	input         mem_write,
+	input         alu_to_reg,
+	input  [4:0]  dest_reg_sel,
+	input         mem_to_reg,
+	input  [1:0]  read_address,
+	input  [2:0]  alu_operation,
+
+	// Outputs
+	output reg [31:0] ex_mem_result,
+	output reg        ex_mem_mem_write,
+	output reg        ex_mem_alu_to_reg,
+	output reg [4:0]  ex_mem_dest_reg_sel,
+	output reg        ex_mem_mem_to_reg,
+	output reg [31:0] ex_mem_store_address,
+	output reg [31:0] ex_mem_store_data,
+	output reg [1:0]  ex_mem_read_address,
+	output reg [2:0]  ex_mem_alu_operation
+);
+
+always @(posedge clk or negedge reset_n) begin
+	if (!reset_n) begin
+    	ex_mem_result        <= 32'h0;
+    	ex_mem_mem_write     <= 1'b0;
+    	ex_mem_alu_to_reg    <= 1'b0;
+    	ex_mem_dest_reg_sel  <= 5'h0;
+    	ex_mem_mem_to_reg    <= 1'b0;
+    	ex_mem_store_address <= 32'h0;
+    	ex_mem_store_data    <= 32'h0;
+    	ex_mem_read_address  <= 2'h0;
+    	ex_mem_alu_operation <= 3'h0;
+	end
+    else if (stall_n) begin
+    	ex_mem_result        <= ex_result;
+    	ex_mem_mem_write     <= mem_write;
+    	ex_mem_alu_to_reg    <= alu_to_reg;
+    	ex_mem_dest_reg_sel  <= dest_reg_sel;
+    	ex_mem_mem_to_reg    <= mem_to_reg;
+    	ex_mem_store_address <= store_address;
+    	ex_mem_store_data    <= store_data;
+    	ex_mem_read_address  <= read_address;
+    	ex_mem_alu_operation <= alu_operation;
+	end
 end
 
 endmodule
