@@ -284,8 +284,6 @@ module IF_ID #(
       .illegal_inst_o     (illegal_inst_w),
       .is_m_ext_o         (is_m_ext_w)      // <-- ADD THIS LINE (Output)
   );
-<<<<<<< HEAD
-=======
 endmodule
 
 
@@ -394,5 +392,4 @@ module id_ex_reg (
     end
   end
 
->>>>>>> 0f96ef2627fd95f1860580ab95e43c1068d1d676
 endmodule

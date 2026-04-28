@@ -22,35 +22,24 @@ module uart_rx #(
     reg [15:0] clk_count;
     reg [2:0]  bit_index;
     
-    // Double-flop synchronizer for asynchronous RX input
+    // RX must synchronize an external asynchronous signal before sampling it.
+    // A simple 2-flop synchronizer plus falling-edge detect is enough here.
     (* ASYNC_REG = "TRUE" *) reg rx_r1;
     (* ASYNC_REG = "TRUE" *) reg rx_sync;
     reg rx_sync_d;
-    reg rx_sync_dd;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            rx_r1   <= 1'b1;
-            rx_sync <= 1'b1;
+            rx_r1     <= 1'b1;
+            rx_sync   <= 1'b1;
             rx_sync_d <= 1'b1;
-            rx_sync_dd <= 1'b1;
         end else begin
-            rx_r1   <= rx;
-            rx_sync <= rx_r1;
+            rx_r1     <= rx;
+            rx_sync   <= rx_r1;
             rx_sync_d <= rx_sync;
-            rx_sync_dd <= rx_sync_d;
         end
     end
 
-    wire rx_filt = (rx_sync & rx_sync_d) | (rx_sync & rx_sync_dd) | (rx_sync_d & rx_sync_dd);
-    reg rx_filt_d;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            rx_filt_d <= 1'b1;
-        else
-            rx_filt_d <= rx_filt;
-    end
-
-    wire start_edge = rx_filt_d && !rx_filt;
+    wire start_edge = rx_sync_d && !rx_sync;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -76,7 +65,7 @@ module uart_rx #(
                 s_START: begin
                     // Wait to reach the middle of the start bit
                     if (clk_count == (CLKS_PER_BIT / 2) - 1) begin
-                        if (rx_filt == 1'b0) begin // Confirm it's still low
+                        if (rx_sync == 1'b0) begin // Confirm it's still low
                             clk_count <= 16'd0;
                             state     <= s_DATA;
                         end else begin
@@ -93,7 +82,7 @@ module uart_rx #(
                         clk_count <= clk_count + 1'b1;
                     end else begin
                         clk_count <= 16'd0;
-                        rx_data[bit_index] <= rx_filt; // Sample data
+                        rx_data[bit_index] <= rx_sync; // Sample data
                         
                         if (bit_index < 7) begin
                             bit_index <= bit_index + 1'b1;
@@ -111,7 +100,7 @@ module uart_rx #(
                     end else begin
                         clk_count <= 16'd0;
                         // Only accept the byte if the stop bit is high.
-                        if (rx_filt == 1'b1)
+                        if (rx_sync == 1'b1)
                             rx_valid  <= 1'b1;
                         state     <= s_IDLE;
                     end

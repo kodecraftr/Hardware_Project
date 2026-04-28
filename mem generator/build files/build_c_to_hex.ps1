@@ -8,16 +8,35 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$toolRoot = "C:\Users\pranj\AppData\Roaming\xPacks\@xpack-dev-tools\riscv-none-elf-gcc\15.2.0-1.1\.content\bin"
-$gcc = Join-Path $toolRoot "riscv-none-elf-gcc.exe"
-$objcopy = Join-Path $toolRoot "riscv-none-elf-objcopy.exe"
-$size = Join-Path $toolRoot "riscv-none-elf-size.exe"
+function Resolve-Tool([string]$toolName) {
+    $overrideRoot = $env:RISCV_GNU_TOOLCHAIN
+    if ($overrideRoot) {
+        $candidates = @(
+            (Join-Path $overrideRoot "$toolName.exe"),
+            (Join-Path (Join-Path $overrideRoot "bin") "$toolName.exe")
+        )
+        foreach ($candidate in $candidates) {
+            if (Test-Path $candidate) {
+                return $candidate
+            }
+        }
+    }
 
-if (!(Test-Path $gcc)) {
-    throw "RISC-V GCC not found at $gcc"
+    $cmd = Get-Command $toolName -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return $cmd.Source
+    }
+
+    throw "Could not find $toolName. Add it to PATH or set RISCV_GNU_TOOLCHAIN to the toolchain folder."
 }
-if (!(Test-Path $objcopy)) {
-    throw "RISC-V objcopy not found at $objcopy"
+
+$gcc = Resolve-Tool "riscv-none-elf-gcc"
+$objcopy = Resolve-Tool "riscv-none-elf-objcopy"
+$size = Resolve-Tool "riscv-none-elf-size"
+
+$python = Get-Command python -ErrorAction SilentlyContinue
+if (!$python) {
+    throw "Could not find python. Install Python 3 and add it to PATH."
 }
 
 $srcDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -61,8 +80,8 @@ $gccArgs = @(
 & $size $elf
 & $objcopy -O binary --only-section=.text $elf $imemBin
 & $objcopy -O binary --only-section=.dmem_init $elf $dmemBin
-python $hexPy $imemBin $imemHex 1024
-python $hexPy $dmemBin $dmemHex 1024
+& $python.Source $hexPy $imemBin $imemHex 1024
+& $python.Source $hexPy $dmemBin $dmemHex 1024
 
 if ($InstallActive) {
     Copy-Item $imemHex $activeImemPath -Force
